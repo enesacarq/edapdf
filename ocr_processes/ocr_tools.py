@@ -327,4 +327,327 @@ def create_qr_code(data, output_path):
     qr.make_image(fill_color="black", back_color="white").save(output_path)
     return output_path
 
+# ----------------------------------------------------------------------
+# PENCERE ARAYÜZÜ (tkinter)
+# ----------------------------------------------------------------------
+# Dosya seçme pencerelerinde görünecek dosya türleri
+_GORSELLER = "*.jpg *.jpeg *.png *.tif *.tiff *.bmp *.webp"
+_TIP_GORSEL = [("Görseller", _GORSELLER), ("Tüm dosyalar", "*.*")]
+_TIP_PDF = [("PDF", "*.pdf"), ("Tüm dosyalar", "*.*")]
+_TIP_PDF_GORSEL = [("PDF ve görseller", "*.pdf " + _GORSELLER), ("Tüm dosyalar", "*.*")]
+_TIP_EXCEL = [("Excel", "*.xlsx *.xlsm"), ("Tüm dosyalar", "*.*")]
+_TIP_CSV = [("CSV", "*.csv"), ("Tüm dosyalar", "*.*")]
+
+# Menüdeki her işlem için ayarlar:
+#   tipler : girdi dosyası seçim penceresinin türleri (None ise girdi metin kutusudur)
+#   cikti  : oluşacak dosyanın uzantısı (None ise sonuç ekranda metin olarak gösterilir)
+#   dil    : OCR dili seçimi gösterilsin mi
+#   sayfa  : Excel sayfa adı kutusu gösterilsin mi
+ISLEMLER = {
+    "Görselden metin çıkar":   {"tipler": _TIP_GORSEL,     "cikti": None,    "dil": True,  "sayfa": False},
+    "PDF'ten metin çıkar":     {"tipler": _TIP_PDF,        "cikti": None,    "dil": True,  "sayfa": False},
+    "Aranabilir PDF oluştur":  {"tipler": _TIP_PDF_GORSEL, "cikti": ".pdf",  "dil": True,  "sayfa": False},
+    "Excel → CSV":             {"tipler": _TIP_EXCEL,      "cikti": ".csv",  "dil": False, "sayfa": True},
+    "CSV → Excel":             {"tipler": _TIP_CSV,        "cikti": ".xlsx", "dil": False, "sayfa": False},
+    "QR kod oluştur":          {"tipler": None,            "cikti": ".png",  "dil": False, "sayfa": False},
+}
+
+
+def _klasoru_ac(yol):
+    """Verilen dosyanın klasörünü dosya gezgininde açar."""
+    klasor = os.path.dirname(os.path.abspath(yol))
+    if os.name == "nt":
+        os.startfile(klasor)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", klasor])
+    else:
+        subprocess.run(["xdg-open", klasor])
+
+
+class OcrArayuz:
+    """Tek pencerelik arayüz: işlem seç, dosya seç, çalıştır."""
+
+    def __init__(self, root):
+        self.root = root
+        root.title("OCR Araçları")
+        root.geometry("760x640")
+        root.minsize(660, 540)
+
+        self.kuyruk = queue.Queue()  # Arka plan işinin sonucu buraya gelir
+        self.son_dosya = None        # Üretilen son dosya ("Klasörü aç" için)
+
+        # Kutulara bağlı değişkenler
+        self.islem = tk.StringVar(value=next(iter(ISLEMLER)))
+        self.girdi = tk.StringVar()
+        self.cikti = tk.StringVar()
+        self.dil = tk.StringVar(value="tur+eng")
+        self.sayfa = tk.StringVar()
+
+        ana = ttk.Frame(root, padding=14)
+        ana.pack(fill="both", expand=True)
+        ana.columnconfigure(1, weight=1)
+        ana.rowconfigure(7, weight=1)  # Sonuç kutusu pencereyle birlikte büyüsün
+
+        # Satır 0: işlem seçimi
+        ttk.Label(ana, text="İşlem").grid(row=0, column=0, sticky="w", pady=4)
+        kutu = ttk.Combobox(ana, textvariable=self.islem, values=list(ISLEMLER),
+                            state="readonly")
+        kutu.grid(row=0, column=1, columnspan=2, sticky="ew", pady=4)
+        kutu.bind("<<ComboboxSelected>>", lambda e: self.islem_degisti())
+
+        # Satır 1: girdi (dosya veya metin)
+        self.lbl_girdi = ttk.Label(ana, text="Girdi dosyası")
+        self.ent_girdi = ttk.Entry(ana, textvariable=self.girdi)
+        self.btn_girdi = ttk.Button(ana, text="Gözat...", command=self.girdi_sec)
+
+        # Satır 2: çıktı dosyası
+        self.lbl_cikti = ttk.Label(ana, text="Çıktı dosyası")
+        self.ent_cikti = ttk.Entry(ana, textvariable=self.cikti)
+        self.btn_cikti = ttk.Button(ana, text="Kaydet yeri...", command=self.cikti_sec)
+
+        # Satır 3: dil
+        self.lbl_dil = ttk.Label(ana, text="OCR dili")
+        self.cmb_dil = ttk.Combobox(ana, textvariable=self.dil, state="readonly",
+                                    values=["tur+eng", "tur", "eng"])
+
+        # Satır 4: Excel sayfa adı
+        self.lbl_sayfa = ttk.Label(ana, text="Sayfa adı (boşsa ilk sayfa)")
+        self.ent_sayfa = ttk.Entry(ana, textvariable=self.sayfa)
+
+        # Satır 5: çalıştır, satır 6: ilerleme
+        self.btn_calistir = ttk.Button(ana, text="Çalıştır", command=self.calistir)
+        self.btn_calistir.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        self.cubuk = ttk.Progressbar(ana, mode="indeterminate")
+        self.cubuk.grid(row=6, column=0, columnspan=3, sticky="ew", pady=4)
+
+        # Satır 7: sonuç kutusu (düzenlenebilir: OCR hatalarını elle düzeltebilirsin)
+        cerceve = ttk.Frame(ana)
+        cerceve.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=4)
+        cerceve.columnconfigure(0, weight=1)
+        cerceve.rowconfigure(0, weight=1)
+        self.sonuc = tk.Text(cerceve, wrap="word", height=10)
+        kaydirma = ttk.Scrollbar(cerceve, command=self.sonuc.yview)
+        self.sonuc.configure(yscrollcommand=kaydirma.set)
+        self.sonuc.grid(row=0, column=0, sticky="nsew")
+        kaydirma.grid(row=0, column=1, sticky="ns")
+
+        # Satır 8: sonuç düğmeleri
+        alt = ttk.Frame(ana)
+        alt.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.btn_kopyala = ttk.Button(alt, text="Metni kopyala", command=self.kopyala)
+        self.btn_txt = ttk.Button(alt, text="TXT olarak kaydet", command=self.txt_kaydet)
+        self.btn_klasor = ttk.Button(alt, text="Klasörü aç", command=self.klasoru_ac)
+        for b in (self.btn_kopyala, self.btn_txt, self.btn_klasor):
+            b.pack(side="left", padx=(0, 6))
+
+        self.islem_degisti()
+
+    # ---------- Görünümü işleme göre ayarla ----------
+    def ayar(self):
+        return ISLEMLER[self.islem.get()]
+
+    def satir_goster(self, satir, widgetlar, goster):
+        """Bir satırdaki kutuları göster/gizle."""
+        for sutun, w in enumerate(widgetlar):
+            if goster:
+                if len(widgetlar) == 2:  # etiket + tek kutu: kutu iki sütuna yayılsın
+                    w.grid(row=satir, column=sutun, columnspan=1 if sutun == 0 else 2,
+                           sticky="w" if sutun == 0 else "ew", pady=4, padx=(0, 6))
+                else:
+                    w.grid(row=satir, column=sutun, sticky="w" if sutun == 0 else "ew",
+                           pady=4, padx=(0, 6))
+            else:
+                w.grid_remove()
+
+    def islem_degisti(self):
+        a = self.ayar()
+        qr = a["tipler"] is None
+        self.lbl_girdi.config(text="QR'a yazılacak metin / URL" if qr else "Girdi dosyası")
+        self.satir_goster(1, [self.lbl_girdi, self.ent_girdi, self.btn_girdi], True)
+        if qr:
+            self.btn_girdi.grid_remove()           # metin girilecek, Gözat gerekmez
+            self.ent_girdi.grid_configure(columnspan=2)
+        else:
+            self.ent_girdi.grid_configure(columnspan=1)
+        self.satir_goster(2, [self.lbl_cikti, self.ent_cikti, self.btn_cikti], a["cikti"] is not None)
+        self.satir_goster(3, [self.lbl_dil, self.cmb_dil], a["dil"])
+        self.satir_goster(4, [self.lbl_sayfa, self.ent_sayfa], a["sayfa"])
+        self.girdi.set("")
+        self.cikti.set("")
+        self.sonuc_temizle()
+
+    def sonuc_temizle(self):
+        self.sonuc.delete("1.0", "end")
+        self.son_dosya = None
+        self.butonlari_ayarla(metin=False, dosya=False)
+
+    def butonlari_ayarla(self, metin, dosya):
+        """Sonuç düğmelerini duruma göre aç/kapat."""
+        self.btn_kopyala.state(["!disabled"] if metin else ["disabled"])
+        self.btn_txt.state(["!disabled"] if metin else ["disabled"])
+        self.btn_klasor.state(["!disabled"] if dosya else ["disabled"])
+
+    # ---------- Dosya seçme ----------
+    def girdi_sec(self):
+        yol = filedialog.askopenfilename(title="Dosya seç", filetypes=self.ayar()["tipler"])
+        if yol:
+            self.girdi.set(yol)
+            self.cikti_oner()
+
+    def cikti_oner(self):
+        """Çıktı için otomatik bir isim önerir (girdi ile aynı klasörde)."""
+        uzanti = self.ayar()["cikti"]
+        if not uzanti or not self.girdi.get():
+            return
+        p = Path(self.girdi.get())
+        if self.islem.get() == "Aranabilir PDF oluştur":
+            self.cikti.set(str(p.with_name(p.stem + "_aranabilir.pdf")))
+        elif self.ayar()["tipler"] is None:  # QR: girdi metindir, dosya adı sabit
+            self.cikti.set(str(Path.cwd() / "qr.png"))
+        else:
+            self.cikti.set(str(p.with_suffix(uzanti)))
+
+    def cikti_sec(self):
+        uzanti = self.ayar()["cikti"]
+        yol = filedialog.asksaveasfilename(title="Nereye kaydedilsin?",
+                                           defaultextension=uzanti,
+                                           initialfile=os.path.basename(self.cikti.get()))
+        if yol:
+            self.cikti.set(yol)
+
+    # ---------- Çalıştırma ----------
+    def calistir(self):
+        ad, a = self.islem.get(), self.ayar()
+        girdi = self.girdi.get().strip()
+        cikti = self.cikti.get().strip()
+
+        # Kutular dolu mu diye kontrol et
+        if not girdi:
+            messagebox.showwarning("Eksik bilgi", "Önce girdi dosyasını seç (veya metni yaz).")
+            return
+        if a["tipler"] is not None and not os.path.isfile(girdi):
+            messagebox.showwarning("Dosya yok", f"Dosya bulunamadı:\n{girdi}")
+            return
+        if a["cikti"] and not cikti:
+            self.cikti_oner()
+            cikti = self.cikti.get().strip()
+
+        self.sonuc_temizle()
+        self.btn_calistir.state(["disabled"])
+        self.cubuk.start(12)
+
+        dil, sayfa = self.dil.get(), self.sayfa.get().strip() or None
+
+        # Uzun işi ayrı iş parçacığında çalıştır; yoksa pencere donar.
+        def is_parcacigi():
+            try:
+                if ad == "Görselden metin çıkar":
+                    sonuc = ("metin", extract_text_from_image(girdi, dil))
+                elif ad == "PDF'ten metin çıkar":
+                    sonuc = ("metin", extract_text_from_pdf(girdi, dil))
+                elif ad == "Aranabilir PDF oluştur":
+                    sonuc = ("dosya", create_searchable_pdf(girdi, cikti, dil))
+                elif ad == "Excel → CSV":
+                    sonuc = ("dosya", excel_to_csv(girdi, cikti, sayfa))
+                elif ad == "CSV → Excel":
+                    sonuc = ("dosya", csv_to_excel(girdi, cikti))
+                else:
+                    sonuc = ("dosya", create_qr_code(girdi, cikti))
+                self.kuyruk.put(("ok",) + sonuc)
+            except Exception as hata:
+                self.kuyruk.put(("hata", str(hata), None))
+
+        threading.Thread(target=is_parcacigi, daemon=True).start()
+        self.root.after(150, self.sonucu_bekle)
+
+    def sonucu_bekle(self):
+        """Arka plan işi bitti mi diye periyodik bakar."""
+        try:
+            durum, tur_veya_mesaj, deger = self.kuyruk.get_nowait()
+        except queue.Empty:
+            self.root.after(150, self.sonucu_bekle)
+            return
+
+        self.cubuk.stop()
+        self.btn_calistir.state(["!disabled"])
+        if durum == "hata":
+            self.sonuc.insert("1.0", "HATA:\n" + tur_veya_mesaj)
+            messagebox.showerror("Hata", tur_veya_mesaj[:600])
+        elif tur_veya_mesaj == "metin":
+            self.sonuc.insert("1.0", deger if deger else "(Metin bulunamadı)")
+            self.butonlari_ayarla(metin=bool(deger), dosya=False)
+        else:
+            self.son_dosya = deger
+            self.sonuc.insert("1.0", f"Tamamlandı.\nOluşturulan dosya:\n{deger}")
+            self.butonlari_ayarla(metin=False, dosya=True)
+
+    # ---------- Sonuç düğmeleri ----------
+    def kopyala(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.sonuc.get("1.0", "end-1c"))
+
+    def txt_kaydet(self):
+        yol = filedialog.asksaveasfilename(defaultextension=".txt",
+                                           filetypes=[("Metin dosyası", "*.txt")])
+        if yol:
+            with open(yol, "w", encoding="utf-8") as f:
+                f.write(self.sonuc.get("1.0", "end-1c"))
+
+    def klasoru_ac(self):
+        if self.son_dosya:
+            _klasoru_ac(self.son_dosya)
+
+
+def _gui():
+    """Pencereyi açar."""
+    if tk is None:
+        sys.exit("tkinter bulunamadı. Python'u yeniden kurarken 'tcl/tk' seçeneğini işaretle.")
+    # Windows'ta yazıların bulanık görünmesini engelle
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    root = tk.Tk()
+    OcrArayuz(root)
+    root.mainloop()
+
+
+# ----------------------------------------------------------------------
+# KOMUT SATIRI ARAYÜZÜ
+# ----------------------------------------------------------------------
+def _main():
+    p = argparse.ArgumentParser(description="OCR ve dönüştürme araçları")
+    alt = p.add_subparsers(dest="komut", required=True)
+
+    a = alt.add_parser("gorsel-metin");  a.add_argument("girdi")
+    a = alt.add_parser("pdf-metin");     a.add_argument("girdi")
+    a = alt.add_parser("aranabilir-pdf"); a.add_argument("girdi"); a.add_argument("cikti")
+    a = alt.add_parser("excel-csv");     a.add_argument("girdi"); a.add_argument("cikti"); a.add_argument("sayfa", nargs="?")
+    a = alt.add_parser("csv-excel");     a.add_argument("girdi"); a.add_argument("cikti")
+    a = alt.add_parser("qr");            a.add_argument("veri");  a.add_argument("cikti")
+    for ad in ("gorsel-metin", "pdf-metin", "aranabilir-pdf"):
+        alt.choices[ad].add_argument("--dil", default="tur+eng", help="OCR dili (varsayılan tur+eng)")
+
+    s = p.parse_args()
+    if s.komut == "gorsel-metin":
+        print(extract_text_from_image(s.girdi, s.dil))
+    elif s.komut == "pdf-metin":
+        print(extract_text_from_pdf(s.girdi, s.dil))
+    elif s.komut == "aranabilir-pdf":
+        print("Oluşturuldu:", create_searchable_pdf(s.girdi, s.cikti, s.dil))
+    elif s.komut == "excel-csv":
+        print("Oluşturuldu:", excel_to_csv(s.girdi, s.cikti, s.sayfa))
+    elif s.komut == "csv-excel":
+        print("Oluşturuldu:", csv_to_excel(s.girdi, s.cikti))
+    elif s.komut == "qr":
+        print("Oluşturuldu:", create_qr_code(s.veri, s.cikti))
+
+
+if __name__ == "__main__":
+    # Argüman verilmişse komut satırı, verilmemişse pencere arayüzü
+    if len(sys.argv) > 1:
+        _main()
+    else:
+        _gui()
 
