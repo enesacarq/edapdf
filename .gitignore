@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Local environment
+.venv/
+.env
+.vscode/
+
+# Generated test files
+results/
+output_images/
+
+# Personal documents
+adli sicil.pdf
