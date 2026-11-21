@@ -12,7 +12,7 @@ Bu dosyada 6 fonksiyon var:
 
 KURULUM :
   - Sisteme kur: Tesseract (Turkish dil paketiyle) ve Ghostscript
-  - Sonra:  pip install -r requirements.txt
+  - Sonra:  pip install -r requirements-ocr.txt
 
 PENCERE (ARAYÜZ) İLE KULLANIM:
   python ocr_tools.py          (argüman vermeden çalıştırınca pencere açılır)
